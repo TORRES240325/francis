@@ -366,45 +366,30 @@ def get_lang_for_telegram(telegram_id: int) -> str:
 
 
 def get_keyboard_main(is_logged_in, lang="es"):
-    """Genera teclado inline principal."""
+    """Genera teclado fijo (ReplyKeyboard) principal."""
     lang = _norm_lang(lang)
     if is_logged_in:
         keyboard = [
-            [InlineKeyboardButton(b(lang, "buy"), callback_data="menu_buy")],
-            [InlineKeyboardButton(b(lang, "topup"), callback_data="menu_topup")],
-            [
-                InlineKeyboardButton(b(lang, "account"), callback_data="menu_account"),
-                InlineKeyboardButton(b(lang, "history"), callback_data="menu_history"),
-            ],
-            [InlineKeyboardButton(b(lang, "logout"), callback_data="menu_logout")],
-            [InlineKeyboardButton(b(lang, "language"), callback_data="menu_lang")],
+            [KeyboardButton(b(lang, "buy")), KeyboardButton(b(lang, "account"))],
+            [KeyboardButton(b(lang, "logout")), KeyboardButton(b(lang, "language"))],
         ]
     else:
         keyboard = [
-            [
-                InlineKeyboardButton(b(lang, "login"), callback_data="menu_login"),
-                InlineKeyboardButton(b(lang, "create_account"), callback_data="menu_create"),
-            ],
-            [InlineKeyboardButton(b(lang, "language"), callback_data="menu_lang")],
+            [KeyboardButton(b(lang, "login")), KeyboardButton(b(lang, "create_account"))],
+            [KeyboardButton(b(lang, "language"))],
         ]
-    return InlineKeyboardMarkup(keyboard)
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
 
 
 def get_language_keyboard(lang: str = "es"):
     current_label = LANGUAGE_BUTTONS.get(_norm_lang(lang), LANGUAGE_BUTTONS["es"])
     keyboard = [
-        [
-            InlineKeyboardButton(LANGUAGE_BUTTONS["es"], callback_data="setlang:es"),
-            InlineKeyboardButton(LANGUAGE_BUTTONS["en"], callback_data="setlang:en"),
-        ],
-        [
-            InlineKeyboardButton(LANGUAGE_BUTTONS["pt"], callback_data="setlang:pt"),
-            InlineKeyboardButton(LANGUAGE_BUTTONS["ar"], callback_data="setlang:ar"),
-        ],
-        [InlineKeyboardButton(LANGUAGE_BUTTONS["hi"], callback_data="setlang:hi")],
-        [InlineKeyboardButton(b(lang, "back"), callback_data="menu_back_start")],
+        [KeyboardButton(LANGUAGE_BUTTONS["es"]), KeyboardButton(LANGUAGE_BUTTONS["en"])],
+        [KeyboardButton(LANGUAGE_BUTTONS["pt"]), KeyboardButton(LANGUAGE_BUTTONS["ar"])],
+        [KeyboardButton(LANGUAGE_BUTTONS["hi"])],
+        [KeyboardButton(b(lang, "back"))],
     ]
-    return current_label, InlineKeyboardMarkup(keyboard)
+    return current_label, ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
 
 
 def _reply_target(update: Update):
@@ -941,34 +926,26 @@ async def show_buy_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     """Muestra las categorías de productos."""
     user_id_telegram = update.effective_user.id
     lang = get_lang_for_telegram(user_id_telegram)
-    
-    if update.callback_query:
-        await update.callback_query.answer()
-    target = _reply_target(update)
 
     with get_session() as session_db:
         usuario = session_db.query(Usuario).filter_by(telegram_id=user_id_telegram).first()
         
         if not usuario:
-            await target.reply_text(t(lang, "please_login"))
+            await update.message.reply_text(t(lang, "please_login"))
             return ConversationHandler.END
 
         categorias = session_db.query(Producto.categoria).distinct().all()
     
-    category_map = {}
     keyboard_rows = []
-    for idx, cat_tuple in enumerate(categorias):
+    for cat_tuple in categorias:
         categoria = cat_tuple[0]
         if categoria:
-            key = str(idx)
-            category_map[key] = categoria
-            keyboard_rows.append([InlineKeyboardButton(categoria, callback_data=f"buy_cat:{key}")])
+            keyboard_rows.append([KeyboardButton(categoria)])
 
-    context.user_data["buy_category_map"] = category_map
-    keyboard_rows.append([InlineKeyboardButton(b(lang, "back"), callback_data="menu_back_start")])
-    reply_markup = InlineKeyboardMarkup(keyboard_rows)
+    keyboard_rows.append([KeyboardButton(b(lang, "back"))])
+    reply_markup = ReplyKeyboardMarkup(keyboard_rows, resize_keyboard=True, one_time_keyboard=False)
 
-    await target.reply_text(
+    await update.message.reply_text(
         t(lang, "choose_category"),
         reply_markup=reply_markup
     )
@@ -1228,14 +1205,16 @@ def main() -> None:
     """Ejecuta el bot."""
     application = Application.builder().token(TOKEN).build()
 
-    # Handlers de comandos y botones inline
+    # Handlers de comandos y botones de texto
     application.add_handler(CommandHandler("logout", logout))
-    application.add_handler(CallbackQueryHandler(handle_menu_callback, pattern=r"^menu_(account|history|logout)$"))
+    application.add_handler(MessageHandler(filters.Regex("^👤"), show_account))
+    application.add_handler(MessageHandler(filters.Regex("^🚀"), logout))
 
     # Flujo de Login
     login_conv_handler = ConversationHandler(
         entry_points=[
             CommandHandler("start", start),
+            MessageHandler(filters.Regex("^🔒"), show_login_prompt),
             CallbackQueryHandler(show_login_prompt, pattern=r"^menu_login$"),
             CallbackQueryHandler(prompt_set_language, pattern=r"^menu_lang$"),
             CallbackQueryHandler(show_create_account_info, pattern=r"^menu_create$"),
@@ -1257,12 +1236,24 @@ def main() -> None:
     )
     application.add_handler(login_conv_handler)
 
+    language_conv_handler = ConversationHandler(
+        entry_points=[MessageHandler(filters.Regex("^🌐"), prompt_set_language)],
+        states={
+            SET_LANGUAGE: [
+                CallbackQueryHandler(save_language_callback, pattern=r"^(setlang:|menu_back_start$)"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, save_language),
+            ]
+        },
+        fallbacks=[CommandHandler("start", start)],
+    )
+    application.add_handler(language_conv_handler)
+
     # Flujo de Compra
     buy_conv_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(show_buy_menu, pattern=r"^menu_buy$")],
+        entry_points=[MessageHandler(filters.Regex("^🛒"), show_buy_menu)],
         states={
-            BUY_CATEGORY: [CallbackQueryHandler(handle_category_selection_callback, pattern=r"^(buy_cat:|menu_back_start$)")],
-            BUY_PRODUCT: [CallbackQueryHandler(handle_final_purchase_callback, pattern=r"^(buy_prod:|menu_buy$)")],
+            BUY_CATEGORY: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_category_selection)],
+            BUY_PRODUCT: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_final_purchase)],
         },
         fallbacks=[CommandHandler("start", start)], 
         per_user=True,
