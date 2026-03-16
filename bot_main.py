@@ -402,14 +402,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         lang = _norm_lang(getattr(usuario, "idioma", "es"))
         await update.message.reply_text(
             t(lang, "welcome_back", username=md_safe(usuario.username)),
-            parse_mode='Markdown',
             reply_markup=get_keyboard_main(True, lang)
         )
     else:
         lang = _norm_lang(context.user_data.get("guest_lang", "es"))
         await update.message.reply_text(
             f"{t(lang, 'welcome_guest')}\n\n{t(lang, 'login_prompt')}",
-            parse_mode='Markdown',
             reply_markup=get_keyboard_main(False, lang)
         )
         return LOGIN_KEY
@@ -420,7 +418,6 @@ async def show_login_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     lang = _norm_lang(context.user_data.get("guest_lang", get_lang_for_telegram(update.effective_user.id)))
     await update.message.reply_text(
         t(lang, "login_prompt"),
-        parse_mode='Markdown',
         reply_markup=ReplyKeyboardRemove()
     )
     return LOGIN_KEY
