@@ -1,7 +1,7 @@
 import os
 import logging
 import sys
-from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, DateTime, BigInteger, ForeignKey
+from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, DateTime, BigInteger, ForeignKey, text
 from sqlalchemy.orm import sessionmaker, declarative_base, relationship
 from datetime import datetime
 from dotenv import load_dotenv 
@@ -21,6 +21,7 @@ class Usuario(Base):
     login_key = Column(String(100), nullable=False) 
     saldo = Column(Float, default=0.00)
     es_admin = Column(Boolean, default=False)
+    idioma = Column(String(5), default='es')
     fecha_registro = Column(DateTime, default=datetime.now)
 
 class Producto(Base):
@@ -32,6 +33,30 @@ class Producto(Base):
     descripcion = Column(String(255)) 
     fecha_creacion = Column(DateTime, default=datetime.now)
     keys = relationship("Key", back_populates="producto")
+
+class PaymentMethod(Base):
+    __tablename__ = 'payment_methods'
+    id = Column(Integer, primary_key=True)
+    nombre = Column(String(100), unique=True, nullable=False)
+    instrucciones = Column(String(1000), nullable=False)
+    activo = Column(Boolean, default=True)
+    fecha_creacion = Column(DateTime, default=datetime.now)
+
+class TopUpRequest(Base):
+    __tablename__ = 'topup_requests'
+    id = Column(Integer, primary_key=True)
+    usuario_id = Column(Integer, ForeignKey('usuarios.id'), nullable=False)
+    metodo_pago_id = Column(Integer, ForeignKey('payment_methods.id'), nullable=True)
+    monto = Column(Float, nullable=False)
+    referencia = Column(String(255), nullable=True)
+    status = Column(String(20), default='pending')
+    nota_admin = Column(String(255), nullable=True)
+    fecha_creacion = Column(DateTime, default=datetime.now)
+    fecha_resolucion = Column(DateTime, nullable=True)
+    admin_telegram_id = Column(BigInteger, nullable=True)
+
+    usuario = relationship("Usuario")
+    metodo_pago = relationship("PaymentMethod")
 
 class Key(Base):
     __tablename__ = 'keys'
@@ -55,6 +80,13 @@ def get_session():
 def inicializar_db(engine=ENGINE): 
     """Crea las tablas, y el usuario administrador si no existen."""
     Base.metadata.create_all(bind=engine) 
+
+    # Migración ligera: agrega columna de idioma si no existe (PostgreSQL/SQLite modernos)
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS idioma VARCHAR(5) DEFAULT 'es'"))
+    except Exception as e:
+        logging.warning(f"No se pudo aplicar migración de idioma automáticamente: {e}")
 
     Session = sessionmaker(bind=engine)
     with Session() as session:
