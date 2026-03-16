@@ -64,6 +64,8 @@ class Key(Base):
     producto_id = Column(Integer, ForeignKey('productos.id'), nullable=False)
     licencia = Column(String(255), unique=True, nullable=False)
     estado = Column(String(20), default='available') 
+    usuario_id = Column(Integer, ForeignKey('usuarios.id'), nullable=True)
+    fecha_compra = Column(DateTime, nullable=True)
     producto = relationship("Producto", back_populates="keys")
 
 
@@ -81,12 +83,16 @@ def inicializar_db(engine=ENGINE):
     """Crea las tablas, y el usuario administrador si no existen."""
     Base.metadata.create_all(bind=engine) 
 
-    # Migración ligera: agrega columna de idioma si no existe (PostgreSQL/SQLite modernos)
+    # Migraciones ligeras para esquemas existentes
     try:
         with engine.begin() as conn:
             conn.execute(text("ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS idioma VARCHAR(5) DEFAULT 'es'"))
+            conn.execute(text("ALTER TABLE topup_requests ADD COLUMN IF NOT EXISTS nota_admin VARCHAR(255)"))
+            conn.execute(text("ALTER TABLE topup_requests ADD COLUMN IF NOT EXISTS admin_telegram_id BIGINT"))
+            conn.execute(text("ALTER TABLE keys ADD COLUMN IF NOT EXISTS usuario_id INTEGER"))
+            conn.execute(text("ALTER TABLE keys ADD COLUMN IF NOT EXISTS fecha_compra TIMESTAMP"))
     except Exception as e:
-        logging.warning(f"No se pudo aplicar migración de idioma automáticamente: {e}")
+        logging.warning(f"No se pudieron aplicar migraciones automáticas: {e}")
 
     Session = sessionmaker(bind=engine)
     with Session() as session:
