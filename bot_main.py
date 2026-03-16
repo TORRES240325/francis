@@ -1,7 +1,14 @@
 import os
 import logging
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
+from telegram import (
+    Update,
+    ReplyKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardRemove,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+)
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler, CallbackQueryHandler
 from sqlalchemy.orm.exc import NoResultFound
 from db_models import Usuario, Producto, Key, PaymentMethod, TopUpRequest, inicializar_db, get_session 
 from dotenv import load_dotenv
@@ -359,33 +366,51 @@ def get_lang_for_telegram(telegram_id: int) -> str:
 
 
 def get_keyboard_main(is_logged_in, lang="es"):
-    """Genera el teclado principal basado en el estado de login."""
+    """Genera teclado inline principal."""
     lang = _norm_lang(lang)
     if is_logged_in:
         keyboard = [
-            [KeyboardButton(b(lang, "buy"))],
-            [KeyboardButton(b(lang, "topup"))],
-            [KeyboardButton(b(lang, "account")), KeyboardButton(b(lang, "history"))],
-            [KeyboardButton(b(lang, "logout"))],
-            [KeyboardButton(b(lang, "language"))],
+            [InlineKeyboardButton(b(lang, "buy"), callback_data="menu_buy")],
+            [InlineKeyboardButton(b(lang, "topup"), callback_data="menu_topup")],
+            [
+                InlineKeyboardButton(b(lang, "account"), callback_data="menu_account"),
+                InlineKeyboardButton(b(lang, "history"), callback_data="menu_history"),
+            ],
+            [InlineKeyboardButton(b(lang, "logout"), callback_data="menu_logout")],
+            [InlineKeyboardButton(b(lang, "language"), callback_data="menu_lang")],
         ]
     else:
         keyboard = [
-            [KeyboardButton(b(lang, "login")), KeyboardButton(b(lang, "create_account"))],
-            [KeyboardButton(b(lang, "language"))],
+            [
+                InlineKeyboardButton(b(lang, "login"), callback_data="menu_login"),
+                InlineKeyboardButton(b(lang, "create_account"), callback_data="menu_create"),
+            ],
+            [InlineKeyboardButton(b(lang, "language"), callback_data="menu_lang")],
         ]
-    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
+    return InlineKeyboardMarkup(keyboard)
 
 
 def get_language_keyboard(lang: str = "es"):
     current_label = LANGUAGE_BUTTONS.get(_norm_lang(lang), LANGUAGE_BUTTONS["es"])
     keyboard = [
-        [KeyboardButton(LANGUAGE_BUTTONS["es"]), KeyboardButton(LANGUAGE_BUTTONS["en"])],
-        [KeyboardButton(LANGUAGE_BUTTONS["pt"]), KeyboardButton(LANGUAGE_BUTTONS["ar"])],
-        [KeyboardButton(LANGUAGE_BUTTONS["hi"])],
-        [KeyboardButton(b(lang, "back"))],
+        [
+            InlineKeyboardButton(LANGUAGE_BUTTONS["es"], callback_data="setlang:es"),
+            InlineKeyboardButton(LANGUAGE_BUTTONS["en"], callback_data="setlang:en"),
+        ],
+        [
+            InlineKeyboardButton(LANGUAGE_BUTTONS["pt"], callback_data="setlang:pt"),
+            InlineKeyboardButton(LANGUAGE_BUTTONS["ar"], callback_data="setlang:ar"),
+        ],
+        [InlineKeyboardButton(LANGUAGE_BUTTONS["hi"], callback_data="setlang:hi")],
+        [InlineKeyboardButton(b(lang, "back"), callback_data="menu_back_start")],
     ]
-    return current_label, ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
+    return current_label, InlineKeyboardMarkup(keyboard)
+
+
+def _reply_target(update: Update):
+    if update.callback_query:
+        return update.callback_query.message
+    return update.message
 
 # =================================================================
 # 3. Handlers de Inicio y Login
@@ -394,19 +419,22 @@ def get_language_keyboard(lang: str = "es"):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Muestra el mensaje de bienvenida y el teclado de login/menu."""
     user_id_telegram = update.effective_user.id
+    target = _reply_target(update)
+    if update.callback_query:
+        await update.callback_query.answer()
     
     with get_session() as session_db:
         usuario = session_db.query(Usuario).filter_by(telegram_id=user_id_telegram).first() 
 
     if usuario:
         lang = _norm_lang(getattr(usuario, "idioma", "es"))
-        await update.message.reply_text(
+        await target.reply_text(
             t(lang, "welcome_back", username=md_safe(usuario.username)),
             reply_markup=get_keyboard_main(True, lang)
         )
     else:
         lang = _norm_lang(context.user_data.get("guest_lang", "es"))
-        await update.message.reply_text(
+        await target.reply_text(
             f"{t(lang, 'welcome_guest')}\n\n{t(lang, 'login_prompt')}",
             reply_markup=get_keyboard_main(False, lang)
         )
@@ -415,8 +443,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 async def show_login_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Pide al usuario que ingrese las credenciales."""
+    if update.callback_query:
+        await update.callback_query.answer()
     lang = _norm_lang(context.user_data.get("guest_lang", get_lang_for_telegram(update.effective_user.id)))
-    await update.message.reply_text(
+    await _reply_target(update).reply_text(
         t(lang, "login_prompt"),
         reply_markup=ReplyKeyboardRemove()
     )
@@ -513,13 +543,17 @@ async def logout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             session_db.commit()
             is_logged_in = True
     
+    if update.callback_query:
+        await update.callback_query.answer()
+    target = _reply_target(update)
+
     if is_logged_in:
-        await update.message.reply_text(
+        await target.reply_text(
             t(lang, "logout_ok"),
             reply_markup=get_keyboard_main(False, lang)
         )
     else:
-        await update.message.reply_text(
+        await target.reply_text(
             t(lang, "logout_none"),
             reply_markup=get_keyboard_main(False, lang)
         )
@@ -527,6 +561,9 @@ async def logout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def show_account(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Muestra la información de la cuenta."""
     user_id_telegram = update.effective_user.id
+    if update.callback_query:
+        await update.callback_query.answer()
+    target = _reply_target(update)
     
     with get_session() as session_db:
         usuario = session_db.query(Usuario).filter_by(telegram_id=user_id_telegram).first()
@@ -536,24 +573,28 @@ async def show_account(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         lang_name = LANGUAGE_BUTTONS.get(lang, LANGUAGE_BUTTONS["es"])
         message = t(lang, "account_info", username=md_safe(usuario.username), saldo=usuario.saldo, lang_name=md_safe(lang_name))
         
-        await update.message.reply_text(
+        await target.reply_text(
             message,
             parse_mode='Markdown',
             reply_markup=get_keyboard_main(True, lang)
         )
     else:
         lang = _norm_lang(context.user_data.get("guest_lang", "es"))
-        await update.message.reply_text(t(lang, "please_login"))
+        await target.reply_text(t(lang, "please_login"))
 
 
 async def show_history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id_telegram = update.effective_user.id
     lang = get_lang_for_telegram(user_id_telegram)
 
+    if update.callback_query:
+        await update.callback_query.answer()
+    target = _reply_target(update)
+
     with get_session() as session_db:
         usuario = session_db.query(Usuario).filter_by(telegram_id=user_id_telegram).first()
         if not usuario:
-            await update.message.reply_text(t(lang, "please_login"), reply_markup=get_keyboard_main(False, lang))
+            await target.reply_text(t(lang, "please_login"), reply_markup=get_keyboard_main(False, lang))
             return
 
         compras = (
@@ -591,7 +632,7 @@ async def show_history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         f"{chr(10).join(recargas_lines) if recargas_lines else t(lang, 'history_empty')}"
     )
 
-    await update.message.reply_text(
+    await target.reply_text(
         text,
         parse_mode='Markdown',
         reply_markup=get_keyboard_main(True, lang)
@@ -599,9 +640,11 @@ async def show_history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def prompt_set_language(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if update.callback_query:
+        await update.callback_query.answer()
     lang = _norm_lang(context.user_data.get("guest_lang", get_lang_for_telegram(update.effective_user.id)))
     current_label, lang_keyboard = get_language_keyboard(lang)
-    await update.message.reply_text(
+    await _reply_target(update).reply_text(
         f"{t(lang, 'language_choose')}\n\n{t(lang, 'language_current')}: **{current_label}**",
         parse_mode='Markdown',
         reply_markup=lang_keyboard
@@ -641,7 +684,46 @@ async def save_language(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         await update.message.reply_text(
             t(lang_input, "login_prompt"),
             parse_mode='Markdown',
-            reply_markup=get_keyboard_main(False, lang_input)
+            reply_markup=ReplyKeyboardRemove()
+        )
+        return LOGIN_KEY
+
+    return ConversationHandler.END
+
+
+async def save_language_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    data = query.data or ""
+
+    if data == "menu_back_start":
+        return await start(update, context)
+
+    lang_input = data.split(":", 1)[1] if ":" in data else ""
+    if lang_input not in SUPPORTED_LANGS:
+        current_lang = _norm_lang(context.user_data.get("guest_lang", get_lang_for_telegram(update.effective_user.id)))
+        await query.message.reply_text(t(current_lang, "language_invalid"))
+        return SET_LANGUAGE
+
+    with get_session() as session_db:
+        usuario = session_db.query(Usuario).filter_by(telegram_id=update.effective_user.id).first()
+        is_logged_in = bool(usuario)
+        if usuario:
+            usuario.idioma = lang_input
+            session_db.commit()
+            context.user_data.pop("guest_lang", None)
+        else:
+            context.user_data["guest_lang"] = lang_input
+
+    await query.message.reply_text(
+        t(lang_input, "language_saved"),
+        reply_markup=get_keyboard_main(is_logged_in, lang_input)
+    )
+
+    if not is_logged_in:
+        await query.message.reply_text(
+            t(lang_input, "login_prompt"),
+            reply_markup=ReplyKeyboardRemove()
         )
         return LOGIN_KEY
 
@@ -649,8 +731,10 @@ async def save_language(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 
 
 async def show_create_account_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if update.callback_query:
+        await update.callback_query.answer()
     lang = _norm_lang(context.user_data.get("guest_lang", get_lang_for_telegram(update.effective_user.id)))
-    await update.message.reply_text(t(lang, "account_create_info"), reply_markup=get_keyboard_main(False, lang))
+    await _reply_target(update).reply_text(t(lang, "account_create_info"), reply_markup=get_keyboard_main(False, lang))
     return LOGIN_KEY
 
 
@@ -658,31 +742,69 @@ async def show_topup_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     user_id_telegram = update.effective_user.id
     lang = get_lang_for_telegram(user_id_telegram)
 
+    if update.callback_query:
+        await update.callback_query.answer()
+    target = _reply_target(update)
+
     with get_session() as session_db:
         usuario = session_db.query(Usuario).filter_by(telegram_id=user_id_telegram).first()
         if not usuario:
-            await update.message.reply_text(t(lang, "please_login"))
+            await target.reply_text(t(lang, "please_login"))
             return ConversationHandler.END
 
         metodos = session_db.query(PaymentMethod).filter_by(activo=True).order_by(PaymentMethod.id.asc()).all()
 
     if not metodos:
-        await update.message.reply_text(
+        await target.reply_text(
             t(lang, "no_methods"),
             reply_markup=get_keyboard_main(True, lang)
         )
         return ConversationHandler.END
 
-    keyboard_rows = [[KeyboardButton(f"ID {m.id}: {m.nombre}")] for m in metodos]
-    keyboard_rows.append([KeyboardButton(b(lang, "back"))])
-    reply_markup = ReplyKeyboardMarkup(keyboard_rows, resize_keyboard=True, one_time_keyboard=False)
+    keyboard_rows = [[InlineKeyboardButton(m.nombre, callback_data=f"topup_method:{m.id}")] for m in metodos]
+    keyboard_rows.append([InlineKeyboardButton(b(lang, "back"), callback_data="menu_back_start")])
+    reply_markup = InlineKeyboardMarkup(keyboard_rows)
 
-    await update.message.reply_text(
+    await target.reply_text(
         t(lang, "topup_menu", min_amount=MIN_TOPUP_AMOUNT),
         parse_mode='Markdown',
         reply_markup=reply_markup
     )
     return TOPUP_METHOD
+
+
+async def handle_topup_method_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    lang = get_lang_for_telegram(update.effective_user.id)
+    data = query.data or ""
+
+    if data == "menu_back_start":
+        await start(update, context)
+        return ConversationHandler.END
+
+    try:
+        method_id = int(data.split(":", 1)[1])
+    except Exception:
+        await query.message.reply_text(t(lang, "method_invalid_option"))
+        return TOPUP_METHOD
+
+    with get_session() as session_db:
+        metodo = session_db.query(PaymentMethod).filter_by(id=method_id, activo=True).first()
+
+    if not metodo:
+        await query.message.reply_text(t(lang, "method_not_found"))
+        return TOPUP_METHOD
+
+    context.user_data['topup_method_id'] = metodo.id
+    context.user_data['topup_method_name'] = metodo.nombre
+
+    await query.message.reply_text(
+        t(lang, "topup_method_instructions", method_name=metodo.nombre, instructions=metodo.instrucciones, min_amount=MIN_TOPUP_AMOUNT),
+        parse_mode='Markdown',
+        reply_markup=ReplyKeyboardRemove()
+    )
+    return TOPUP_AMOUNT
 
 
 async def handle_topup_method(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -820,30 +942,141 @@ async def show_buy_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     user_id_telegram = update.effective_user.id
     lang = get_lang_for_telegram(user_id_telegram)
     
+    if update.callback_query:
+        await update.callback_query.answer()
+    target = _reply_target(update)
+
     with get_session() as session_db:
         usuario = session_db.query(Usuario).filter_by(telegram_id=user_id_telegram).first()
         
         if not usuario:
-            await update.message.reply_text(t(lang, "please_login"))
+            await target.reply_text(t(lang, "please_login"))
             return ConversationHandler.END
 
         categorias = session_db.query(Producto.categoria).distinct().all()
     
+    category_map = {}
     keyboard_rows = []
-    for cat_tuple in categorias:
+    for idx, cat_tuple in enumerate(categorias):
         categoria = cat_tuple[0]
-        if categoria: 
-            keyboard_rows.append([KeyboardButton(categoria)])
-            
-    keyboard_rows.append([KeyboardButton(b(lang, "back"))]) 
+        if categoria:
+            key = str(idx)
+            category_map[key] = categoria
+            keyboard_rows.append([InlineKeyboardButton(categoria, callback_data=f"buy_cat:{key}")])
 
-    reply_markup = ReplyKeyboardMarkup(keyboard_rows, resize_keyboard=True, one_time_keyboard=False)
+    context.user_data["buy_category_map"] = category_map
+    keyboard_rows.append([InlineKeyboardButton(b(lang, "back"), callback_data="menu_back_start")])
+    reply_markup = InlineKeyboardMarkup(keyboard_rows)
 
-    await update.message.reply_text(
+    await target.reply_text(
         t(lang, "choose_category"),
         reply_markup=reply_markup
     )
     return BUY_CATEGORY
+
+
+async def handle_category_selection_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    data = query.data or ""
+    lang = get_lang_for_telegram(update.effective_user.id)
+
+    if data == "menu_back_start":
+        await start(update, context)
+        return ConversationHandler.END
+
+    key = data.split(":", 1)[1] if ":" in data else ""
+    category = context.user_data.get("buy_category_map", {}).get(key)
+    if not category:
+        await query.message.reply_text(t(lang, "purchase_selection_error"))
+        return BUY_CATEGORY
+
+    with get_session() as session_db:
+        productos = session_db.query(Producto).filter_by(categoria=category).all()
+
+    if not productos:
+        await query.message.reply_text(t(lang, "no_products", category=category), parse_mode='Markdown')
+        return BUY_CATEGORY
+
+    keyboard_rows = []
+    for producto in productos:
+        with get_session() as s:
+            stock = s.query(Key).filter(Key.producto_id == producto.id, Key.estado == 'available').count()
+        button_text = f"{producto.nombre} - ${producto.precio:.2f} (Stock: {stock})"
+        keyboard_rows.append([InlineKeyboardButton(button_text, callback_data=f"buy_prod:{producto.id}")])
+
+    keyboard_rows.append([InlineKeyboardButton(b(lang, "back"), callback_data="menu_buy")])
+    await query.message.reply_text(
+        t(lang, "choose_product", category=category),
+        reply_markup=InlineKeyboardMarkup(keyboard_rows)
+    )
+    return BUY_PRODUCT
+
+
+async def handle_final_purchase_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    data = query.data or ""
+    user_id_telegram = update.effective_user.id
+    lang = get_lang_for_telegram(user_id_telegram)
+
+    if data == "menu_buy":
+        return await show_buy_menu(update, context)
+
+    try:
+        product_id = int(data.split(":", 1)[1])
+    except Exception:
+        await query.message.reply_text(t(lang, "purchase_selection_error"))
+        return BUY_PRODUCT
+
+    session_db = get_session()
+    try:
+        usuario = session_db.query(Usuario).filter_by(telegram_id=user_id_telegram).first()
+        producto = session_db.query(Producto).filter_by(id=product_id).first()
+
+        if not usuario or not producto:
+            await query.message.reply_text(t(lang, "buy_user_product_not_found"), reply_markup=get_keyboard_main(True, lang))
+            return ConversationHandler.END
+
+        if usuario.saldo < producto.precio:
+            await query.message.reply_text(t(lang, "insufficient_balance", saldo=usuario.saldo))
+            return BUY_PRODUCT
+
+        available_key = session_db.query(Key).filter_by(
+            producto_id=producto.id,
+            estado='available'
+        ).with_for_update().first()
+
+        if not available_key:
+            await query.message.reply_text(t(lang, "product_out_of_stock", product_name=producto.nombre))
+            return BUY_PRODUCT
+
+        usuario.saldo -= producto.precio
+        available_key.estado = 'used'
+        available_key.usuario_id = usuario.id
+        available_key.fecha_compra = datetime.now()
+        session_db.commit()
+
+        await query.message.reply_text(
+            t(
+                lang,
+                "purchase_success",
+                product_name=md_safe(producto.nombre),
+                price=producto.precio,
+                saldo=usuario.saldo,
+                license_key=md_safe(available_key.licencia),
+            ),
+            parse_mode='Markdown',
+            reply_markup=get_keyboard_main(True, lang)
+        )
+        return ConversationHandler.END
+    except Exception as e:
+        logger.error(f"Error en compra inline: {e}")
+        session_db.rollback()
+        await query.message.reply_text(t(lang, "purchase_error"))
+        return ConversationHandler.END
+    finally:
+        session_db.close()
 
 async def handle_category_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Maneja la selección de la categoría y muestra los productos y acciones."""
@@ -961,6 +1194,32 @@ async def handle_final_purchase(update: Update, context: ContextTypes.DEFAULT_TY
     return BUY_PRODUCT
 
 
+async def handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    data = (update.callback_query.data or "") if update.callback_query else ""
+
+    if data == "menu_login":
+        return await show_login_prompt(update, context)
+    if data == "menu_create":
+        return await show_create_account_info(update, context)
+    if data == "menu_lang":
+        return await prompt_set_language(update, context)
+    if data == "menu_account":
+        await show_account(update, context)
+        return ConversationHandler.END
+    if data == "menu_history":
+        await show_history(update, context)
+        return ConversationHandler.END
+    if data == "menu_logout":
+        await logout(update, context)
+        return ConversationHandler.END
+    if data == "menu_back_start":
+        return await start(update, context)
+
+    if update.callback_query:
+        await update.callback_query.answer()
+    return ConversationHandler.END
+
+
 # =================================================================
 # 5. Función Principal de Ejecución
 # =================================================================
@@ -969,42 +1228,41 @@ def main() -> None:
     """Ejecuta el bot."""
     application = Application.builder().token(TOKEN).build()
 
-    # Handlers de comandos y botones de texto simples
+    # Handlers de comandos y botones inline
     application.add_handler(CommandHandler("logout", logout))
-    application.add_handler(MessageHandler(filters.Regex("^👤"), show_account))
-    application.add_handler(MessageHandler(filters.Regex("^📜"), show_history))
-    application.add_handler(MessageHandler(filters.Regex("^🚀"), logout))
+    application.add_handler(CallbackQueryHandler(handle_menu_callback, pattern=r"^menu_(account|history|logout)$"))
 
     # Flujo de Login
     login_conv_handler = ConversationHandler(
         entry_points=[
             CommandHandler("start", start),
-            MessageHandler(filters.Regex("^🔒"), show_login_prompt),
+            CallbackQueryHandler(show_login_prompt, pattern=r"^menu_login$"),
+            CallbackQueryHandler(prompt_set_language, pattern=r"^menu_lang$"),
+            CallbackQueryHandler(show_create_account_info, pattern=r"^menu_create$"),
         ],
         states={
-            LOGIN_KEY: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_login_key)],
-            SET_LANGUAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, save_language)],
+            LOGIN_KEY: [
+                CallbackQueryHandler(show_login_prompt, pattern=r"^menu_login$"),
+                CallbackQueryHandler(prompt_set_language, pattern=r"^menu_lang$"),
+                CallbackQueryHandler(show_create_account_info, pattern=r"^menu_create$"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_login_key),
+            ],
+            SET_LANGUAGE: [
+                CallbackQueryHandler(save_language_callback, pattern=r"^(setlang:|menu_back_start$)"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, save_language),
+            ],
         },
         fallbacks=[CommandHandler("start", start)],
         allow_reentry=True,
     )
     application.add_handler(login_conv_handler)
 
-    language_conv_handler = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex("^🌐"), prompt_set_language)],
-        states={
-            SET_LANGUAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, save_language)]
-        },
-        fallbacks=[CommandHandler("start", start)],
-    )
-    application.add_handler(language_conv_handler)
-    
     # Flujo de Compra
     buy_conv_handler = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex("^🛒"), show_buy_menu)],
+        entry_points=[CallbackQueryHandler(show_buy_menu, pattern=r"^menu_buy$")],
         states={
-            BUY_CATEGORY: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_category_selection)],
-            BUY_PRODUCT: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_final_purchase)],
+            BUY_CATEGORY: [CallbackQueryHandler(handle_category_selection_callback, pattern=r"^(buy_cat:|menu_back_start$)")],
+            BUY_PRODUCT: [CallbackQueryHandler(handle_final_purchase_callback, pattern=r"^(buy_prod:|menu_buy$)")],
         },
         fallbacks=[CommandHandler("start", start)], 
         per_user=True,
@@ -1012,9 +1270,9 @@ def main() -> None:
     application.add_handler(buy_conv_handler)
 
     topup_conv_handler = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex("^💳"), show_topup_menu)],
+        entry_points=[CallbackQueryHandler(show_topup_menu, pattern=r"^menu_topup$")],
         states={
-            TOPUP_METHOD: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_topup_method)],
+            TOPUP_METHOD: [CallbackQueryHandler(handle_topup_method_callback, pattern=r"^(topup_method:|menu_back_start$)")],
             TOPUP_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_topup_amount)],
             TOPUP_REFERENCE: [MessageHandler((filters.TEXT | filters.PHOTO) & ~filters.COMMAND, handle_topup_reference)],
         },
@@ -1022,10 +1280,6 @@ def main() -> None:
         per_user=True,
     )
     application.add_handler(topup_conv_handler)
-    
-    # Manejar el botón "➕ Crear cuenta"
-    application.add_handler(MessageHandler(filters.Regex("^➕"), show_create_account_info))
-
     logger.info("El Bot de Telegram se está iniciando...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
