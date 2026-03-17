@@ -23,6 +23,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             } elseif ($_POST['action'] === 'agregar_keys') {
                 $product_id = intval($_POST['product_id']);
                 $keys_text = $_POST['keys_text'];
+                $duracion = trim($_POST['duracion'] ?? 'General');
+                $precio_override = trim($_POST['precio_override'] ?? '');
+                $precio_key = ($precio_override === '') ? null : floatval($precio_override);
                 $keys_list = array_filter(array_map('trim', explode("\n", $keys_text)));
                 
                 $agregadas = 0;
@@ -30,8 +33,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $check = $db->prepare("SELECT id FROM keys WHERE licencia = ?");
                     $check->execute([$key_str]);
                     if (!$check->fetch()) {
-                        $stmt = $db->prepare("INSERT INTO keys (producto_id, licencia, estado) VALUES (?, ?, 'available')");
-                        $stmt->execute([$product_id, $key_str]);
+                        $stmt = $db->prepare("INSERT INTO keys (producto_id, licencia, estado, duracion, precio) VALUES (?, ?, 'available', ?, ?)");
+                        $stmt->execute([$product_id, $key_str, $duracion !== '' ? $duracion : 'General', $precio_key]);
                         $agregadas++;
                     }
                 }
@@ -48,6 +51,28 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 $productos = $db->query("SELECT p.*, 
     (SELECT COUNT(*) FROM keys k WHERE k.producto_id = p.id AND k.estado = 'available') as stock 
     FROM productos p ORDER BY p.id DESC")->fetchAll();
+
+$stockRows = $db->query("
+    SELECT 
+        k.producto_id,
+        COALESCE(NULLIF(TRIM(k.duracion), ''), 'General') AS duracion,
+        COALESCE(k.precio, p.precio) AS precio_mostrado,
+        COUNT(*) AS stock
+    FROM keys k
+    INNER JOIN productos p ON p.id = k.producto_id
+    WHERE k.estado = 'available'
+    GROUP BY k.producto_id, COALESCE(NULLIF(TRIM(k.duracion), ''), 'General'), COALESCE(k.precio, p.precio)
+    ORDER BY k.producto_id, duracion
+")->fetchAll();
+
+$stockByProduct = [];
+foreach ($stockRows as $row) {
+    $pid = intval($row['producto_id']);
+    if (!isset($stockByProduct[$pid])) {
+        $stockByProduct[$pid] = [];
+    }
+    $stockByProduct[$pid][] = $row;
+}
 ?>
 <!DOCTYPE html>
 <html lang="es">
@@ -106,6 +131,10 @@ $productos = $db->query("SELECT p.*,
         .stock-number { font-weight: 600; color: #fff; }
         .stock-progress { height: 6px; background: rgba(255, 255, 255, 0.1); border-radius: 3px; overflow: hidden; }
         .progress-fill { height: 100%; background: linear-gradient(90deg, #00ff88 0%, #00cc6a 100%); border-radius: 3px; transition: width 0.3s ease; }
+        .duration-list { margin-top: 12px; border-top: 1px solid rgba(255,255,255,0.08); padding-top: 10px; display: grid; gap: 8px; }
+        .duration-row { display: flex; justify-content: space-between; align-items: center; font-size: 0.85rem; background: #12121a; border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; padding: 8px 10px; }
+        .duration-name { color: #a0a0b0; }
+        .duration-meta { color: #fff; font-weight: 600; }
         .product-actions { display: flex; justify-content: space-between; align-items: center; margin-top: auto; padding-top: 16px; border-top: 1px solid rgba(255, 255, 255, 0.1); }
         .product-id { color: #666; font-size: 0.8rem; }
         
@@ -186,6 +215,24 @@ $productos = $db->query("SELECT p.*,
                     <div class="stock-progress">
                         <div class="progress-fill" style="width: <?= min($p['stock'] / 50 * 100, 100) ?>%;"></div>
                     </div>
+                    <div class="duration-list">
+                        <?php $durationRows = $stockByProduct[intval($p['id'])] ?? []; ?>
+                        <?php if (!empty($durationRows)): ?>
+                            <?php foreach ($durationRows as $dr): ?>
+                                <div class="duration-row">
+                                    <span class="duration-name"><?= e($dr['duracion']) ?></span>
+                                    <span class="duration-meta">
+                                        <?= formatMoney($dr['precio_mostrado']) ?> | Stock: <?= intval($dr['stock']) ?>
+                                    </span>
+                                </div>
+                            <?php endforeach; ?>
+                        <?php else: ?>
+                            <div class="duration-row">
+                                <span class="duration-name">General</span>
+                                <span class="duration-meta"><?= formatMoney($p['precio']) ?> | Stock: 0</span>
+                            </div>
+                        <?php endif; ?>
+                    </div>
                 </div>
                 
                 <div class="product-actions">
@@ -240,6 +287,14 @@ $productos = $db->query("SELECT p.*,
                 <input type="hidden" name="product_id" id="keysProductId">
                 <div class="modal-body">
                     <p style="margin-bottom: 20px;">Producto: <strong id="keysProductName"></strong></p>
+                    <div class="form-group">
+                        <label>Duración (ej: 1 Day, 7 Days, 30 Days)</label>
+                        <input type="text" name="duracion" class="form-control" value="General" required>
+                    </div>
+                    <div class="form-group">
+                        <label>Precio por esta duración (opcional)</label>
+                        <input type="number" step="0.01" name="precio_override" class="form-control" placeholder="Si lo dejas vacío, usa el precio del producto">
+                    </div>
                     <div class="form-group">
                         <label>Keys / Licencias (una por línea)</label>
                         <textarea name="keys_text" class="form-control" rows="10" required placeholder="XXXX-XXXX-XXXX-XXXX

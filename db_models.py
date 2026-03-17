@@ -63,6 +63,8 @@ class Key(Base):
     id = Column(Integer, primary_key=True)
     producto_id = Column(Integer, ForeignKey('productos.id'), nullable=False)
     licencia = Column(String(255), unique=True, nullable=False)
+    duracion = Column(String(50), nullable=False, default='General')
+    precio = Column(Float, nullable=True)
     estado = Column(String(20), default='available') 
     usuario_id = Column(Integer, ForeignKey('usuarios.id'), nullable=True)
     fecha_compra = Column(DateTime, nullable=True)
@@ -91,6 +93,9 @@ def inicializar_db(engine=ENGINE):
             conn.execute(text("ALTER TABLE topup_requests ADD COLUMN IF NOT EXISTS admin_telegram_id BIGINT"))
             conn.execute(text("ALTER TABLE keys ADD COLUMN IF NOT EXISTS usuario_id INTEGER"))
             conn.execute(text("ALTER TABLE keys ADD COLUMN IF NOT EXISTS fecha_compra TIMESTAMP"))
+            conn.execute(text("ALTER TABLE keys ADD COLUMN IF NOT EXISTS duracion VARCHAR(50) DEFAULT 'General'"))
+            conn.execute(text("ALTER TABLE keys ADD COLUMN IF NOT EXISTS precio FLOAT"))
+            conn.execute(text("UPDATE keys SET duracion = 'General' WHERE duracion IS NULL OR TRIM(duracion) = ''"))
     except Exception as e:
         logging.warning(f"No se pudieron aplicar migraciones automáticas: {e}")
 

@@ -9,6 +9,7 @@ from telegram import (
     InlineKeyboardButton,
 )
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler, CallbackQueryHandler
+from sqlalchemy import func
 from sqlalchemy.orm.exc import NoResultFound
 from db_models import Usuario, Producto, Key, PaymentMethod, TopUpRequest, inicializar_db, get_session 
 from dotenv import load_dotenv
@@ -30,7 +31,7 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 logger = logging.getLogger(__name__)
 
 # --- Estados del ConversationHandler ---
-LOGIN_KEY, BUY_CATEGORY, BUY_PRODUCT, TOPUP_METHOD, TOPUP_AMOUNT, TOPUP_REFERENCE, SET_LANGUAGE = range(7)
+LOGIN_KEY, BUY_CATEGORY, BUY_PRODUCT, BUY_DURATION, TOPUP_METHOD, TOPUP_AMOUNT, TOPUP_REFERENCE, SET_LANGUAGE = range(8)
 
 LANGUAGE_BUTTONS = {
     "es": "Español",
@@ -145,6 +146,7 @@ TEXTS = {
         "history_purchases": "🛒 **Últimas compras**",
         "history_topups": "💳 **Últimas recargas**",
         "history_empty": "Sin registros todavía.",
+        "choose_key_type": "📁 Elige un tipo de key para {product_name}:",
     },
     "en": {
         "welcome_back": "👋 **Welcome back, {username}.**\nYour session is active.",
@@ -189,6 +191,7 @@ TEXTS = {
         "history_purchases": "🛒 **Latest purchases**",
         "history_topups": "💳 **Latest top-ups**",
         "history_empty": "No records yet.",
+        "choose_key_type": "📁 Choose a key type for {product_name}:",
     },
     "pt": {
         "welcome_back": "👋 **Bem-vindo de volta, {username}.**\nSua sessão está ativa.",
@@ -233,6 +236,7 @@ TEXTS = {
         "history_purchases": "🛒 **Últimas compras**",
         "history_topups": "💳 **Últimas recargas**",
         "history_empty": "Sem registros ainda.",
+        "choose_key_type": "📁 Escolha um tipo de key para {product_name}:",
     },
     "ar": {
         "welcome_back": "👋 **مرحبًا بعودتك، {username}.**\nجلستك نشطة.",
@@ -277,6 +281,7 @@ TEXTS = {
         "history_purchases": "🛒 **آخر المشتريات**",
         "history_topups": "💳 **آخر عمليات الشحن**",
         "history_empty": "لا توجد سجلات بعد.",
+        "choose_key_type": "📁 اختر نوع المفتاح لـ {product_name}:",
     },
     "hi": {
         "welcome_back": "👋 **वापसी पर स्वागत है, {username}.**\nआपका सेशन सक्रिय है।",
@@ -321,6 +326,7 @@ TEXTS = {
         "history_purchases": "🛒 **हाल की खरीद**",
         "history_topups": "💳 **हाल के रिचार्ज**",
         "history_empty": "अभी कोई रिकॉर्ड नहीं है।",
+        "choose_key_type": "📁 {product_name} के लिए key type चुनें:",
     },
 }
 
@@ -384,12 +390,25 @@ def get_keyboard_main(is_logged_in, lang="es"):
 def get_language_keyboard(lang: str = "es"):
     current_label = LANGUAGE_BUTTONS.get(_norm_lang(lang), LANGUAGE_BUTTONS["es"])
     keyboard = [
-        [KeyboardButton(LANGUAGE_BUTTONS["es"]), KeyboardButton(LANGUAGE_BUTTONS["en"])],
-        [KeyboardButton(LANGUAGE_BUTTONS["pt"]), KeyboardButton(LANGUAGE_BUTTONS["ar"])],
-        [KeyboardButton(LANGUAGE_BUTTONS["hi"])],
-        [KeyboardButton(b(lang, "back"))],
+        [
+            InlineKeyboardButton(LANGUAGE_BUTTONS["es"], callback_data="setlang:es"),
+            InlineKeyboardButton(LANGUAGE_BUTTONS["en"], callback_data="setlang:en"),
+        ],
+        [
+            InlineKeyboardButton(LANGUAGE_BUTTONS["pt"], callback_data="setlang:pt"),
+            InlineKeyboardButton(LANGUAGE_BUTTONS["ar"], callback_data="setlang:ar"),
+        ],
+        [InlineKeyboardButton(LANGUAGE_BUTTONS["hi"], callback_data="setlang:hi")],
+        [InlineKeyboardButton(b(lang, "back"), callback_data="menu_back_start")],
     ]
-    return current_label, ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
+    return current_label, InlineKeyboardMarkup(keyboard)
+
+
+def get_account_actions_keyboard(lang: str):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(t(lang, "history_purchases").replace("**", ""), callback_data="account_purchases")],
+        [InlineKeyboardButton(t(lang, "history_topups").replace("**", ""), callback_data="account_topups")],
+    ])
 
 
 def _reply_target(update: Update):
@@ -557,15 +576,63 @@ async def show_account(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         lang = _norm_lang(getattr(usuario, "idioma", "es"))
         lang_name = LANGUAGE_BUTTONS.get(lang, LANGUAGE_BUTTONS["es"])
         message = t(lang, "account_info", username=md_safe(usuario.username), saldo=usuario.saldo, lang_name=md_safe(lang_name))
-        
-        await target.reply_text(
-            message,
-            parse_mode='Markdown',
-            reply_markup=get_keyboard_main(True, lang)
-        )
+        account_actions = get_account_actions_keyboard(lang)
+
+        await target.reply_text(message, parse_mode='Markdown', reply_markup=account_actions)
     else:
         lang = _norm_lang(context.user_data.get("guest_lang", "es"))
         await target.reply_text(t(lang, "please_login"))
+
+
+async def handle_account_inline(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    data = query.data or ""
+    user_id_telegram = update.effective_user.id
+
+    with get_session() as session_db:
+        usuario = session_db.query(Usuario).filter_by(telegram_id=user_id_telegram).first()
+        if not usuario:
+            lang = _norm_lang(context.user_data.get("guest_lang", "es"))
+            await query.edit_message_text(t(lang, "please_login"))
+            return
+
+        lang = _norm_lang(getattr(usuario, "idioma", "es"))
+        lang_name = LANGUAGE_BUTTONS.get(lang, LANGUAGE_BUTTONS["es"])
+        base_account = t(lang, "account_info", username=md_safe(usuario.username), saldo=usuario.saldo, lang_name=md_safe(lang_name))
+
+        details = ""
+        if data == "account_purchases":
+            compras = (
+                session_db.query(Key)
+                .filter(Key.usuario_id == usuario.id, Key.estado == "used")
+                .order_by(Key.fecha_compra.desc().nullslast(), Key.id.desc())
+                .limit(10)
+                .all()
+            )
+            lines = []
+            for c in compras:
+                producto_nombre = c.producto.nombre if c.producto else f"ID {c.producto_id}"
+                fecha_txt = c.fecha_compra.strftime("%Y-%m-%d %H:%M") if c.fecha_compra else "-"
+                lines.append(f"• {md_safe(producto_nombre)} | `{md_safe(c.licencia)}` | {md_safe(fecha_txt)}")
+            details = f"\n\n{t(lang, 'history_purchases')}\n{chr(10).join(lines) if lines else t(lang, 'history_empty')}"
+        elif data == "account_topups":
+            recargas = (
+                session_db.query(TopUpRequest)
+                .filter(TopUpRequest.usuario_id == usuario.id)
+                .order_by(TopUpRequest.fecha_creacion.desc())
+                .limit(10)
+                .all()
+            )
+            lines = []
+            for r in recargas:
+                fecha_txt = r.fecha_creacion.strftime("%Y-%m-%d %H:%M") if r.fecha_creacion else "-"
+                metodo = r.metodo_pago.nombre if r.metodo_pago else "-"
+                lines.append(f"• ID `{r.id}` | ${r.monto:.2f} | {md_safe(r.status)} | {md_safe(metodo)} | {md_safe(fecha_txt)}")
+            details = f"\n\n{t(lang, 'history_topups')}\n{chr(10).join(lines) if lines else t(lang, 'history_empty')}"
+
+    account_actions = get_account_actions_keyboard(lang)
+    await query.edit_message_text(f"{base_account}{details}", parse_mode='Markdown', reply_markup=account_actions)
 
 
 async def show_history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -936,19 +1003,24 @@ async def show_buy_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 
         categorias = session_db.query(Producto.categoria).distinct().all()
     
+    category_map = {}
     keyboard_rows = []
     for cat_tuple in categorias:
         categoria = cat_tuple[0]
         if categoria:
-            keyboard_rows.append([KeyboardButton(categoria)])
+            idx = str(len(category_map))
+            category_map[idx] = categoria
+            keyboard_rows.append([InlineKeyboardButton(categoria, callback_data=f"buy_cat:{idx}")])
 
-    keyboard_rows.append([KeyboardButton(b(lang, "back"))])
-    reply_markup = ReplyKeyboardMarkup(keyboard_rows, resize_keyboard=True, one_time_keyboard=False)
+    context.user_data["buy_category_map"] = category_map
+    keyboard_rows.append([InlineKeyboardButton(b(lang, "back"), callback_data="menu_back_start")])
+    reply_markup = InlineKeyboardMarkup(keyboard_rows)
 
-    await update.message.reply_text(
-        t(lang, "choose_category"),
-        reply_markup=reply_markup
-    )
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.message.edit_text(t(lang, "choose_category"), reply_markup=reply_markup)
+    else:
+        await update.message.reply_text(t(lang, "choose_category"), reply_markup=reply_markup)
     return BUY_CATEGORY
 
 
@@ -972,9 +1044,10 @@ async def handle_category_selection_callback(update: Update, context: ContextTyp
         productos = session_db.query(Producto).filter_by(categoria=category).all()
 
     if not productos:
-        await query.message.reply_text(t(lang, "no_products", category=category), parse_mode='Markdown')
+        await query.edit_message_text(t(lang, "no_products", category=category), parse_mode='Markdown')
         return BUY_CATEGORY
 
+    context.user_data["selected_category"] = category
     keyboard_rows = []
     for producto in productos:
         with get_session() as s:
@@ -983,14 +1056,14 @@ async def handle_category_selection_callback(update: Update, context: ContextTyp
         keyboard_rows.append([InlineKeyboardButton(button_text, callback_data=f"buy_prod:{producto.id}")])
 
     keyboard_rows.append([InlineKeyboardButton(b(lang, "back"), callback_data="menu_buy")])
-    await query.message.reply_text(
+    await query.edit_message_text(
         t(lang, "choose_product", category=category),
         reply_markup=InlineKeyboardMarkup(keyboard_rows)
     )
     return BUY_PRODUCT
 
 
-async def handle_final_purchase_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def handle_product_selection_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
     data = query.data or ""
@@ -1003,8 +1076,102 @@ async def handle_final_purchase_callback(update: Update, context: ContextTypes.D
     try:
         product_id = int(data.split(":", 1)[1])
     except Exception:
-        await query.message.reply_text(t(lang, "purchase_selection_error"))
+        await query.edit_message_text(t(lang, "purchase_selection_error"))
         return BUY_PRODUCT
+
+    with get_session() as session_db:
+        producto = session_db.query(Producto).filter_by(id=product_id).first()
+        if not producto:
+            await query.edit_message_text(t(lang, "buy_user_product_not_found"))
+            return ConversationHandler.END
+
+        duration_rows = (
+            session_db.query(
+                Key.duracion,
+                func.coalesce(Key.precio, Producto.precio).label("price_value"),
+                func.count(Key.id).label("stock_value"),
+            )
+            .join(Producto, Producto.id == Key.producto_id)
+            .filter(Key.producto_id == producto.id, Key.estado == "available")
+            .group_by(Key.duracion, func.coalesce(Key.precio, Producto.precio))
+            .order_by(Key.duracion.asc())
+            .all()
+        )
+
+    if not duration_rows:
+        await query.edit_message_text(t(lang, "product_out_of_stock", product_name=producto.nombre))
+        return BUY_PRODUCT
+
+    duration_map = {}
+    keyboard_rows = []
+    for idx, row in enumerate(duration_rows):
+        duration_value = row[0] or "General"
+        price_value = float(row[1] if row[1] is not None else producto.precio)
+        stock_value = int(row[2] or 0)
+        key = str(idx)
+        duration_map[key] = {"duration": duration_value, "price": price_value}
+        button_text = f"{duration_value} - ${price_value:.2f} (Stock: {stock_value})"
+        keyboard_rows.append([InlineKeyboardButton(button_text, callback_data=f"buy_dur:{producto.id}:{key}")])
+
+    context.user_data["buy_selected_product_id"] = producto.id
+    context.user_data["buy_duration_map"] = duration_map
+    keyboard_rows.append([InlineKeyboardButton(b(lang, "back"), callback_data="buy_back_prod")])
+    await query.edit_message_text(
+        t(lang, "choose_key_type", product_name=producto.nombre),
+        reply_markup=InlineKeyboardMarkup(keyboard_rows)
+    )
+    return BUY_DURATION
+
+
+async def handle_final_purchase_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    data = query.data or ""
+    user_id_telegram = update.effective_user.id
+    lang = get_lang_for_telegram(user_id_telegram)
+
+    if data == "menu_buy":
+        return await show_buy_menu(update, context)
+    if data == "buy_back_prod":
+        category = context.user_data.get("selected_category")
+        if not category:
+            return await show_buy_menu(update, context)
+
+        with get_session() as session_db:
+            productos = session_db.query(Producto).filter_by(categoria=category).all()
+
+        keyboard_rows = []
+        for producto in productos:
+            with get_session() as s:
+                stock = s.query(Key).filter(Key.producto_id == producto.id, Key.estado == 'available').count()
+            button_text = f"{producto.nombre} - ${producto.precio:.2f} (Stock: {stock})"
+            keyboard_rows.append([InlineKeyboardButton(button_text, callback_data=f"buy_prod:{producto.id}")])
+        keyboard_rows.append([InlineKeyboardButton(b(lang, "back"), callback_data="menu_buy")])
+
+        await query.edit_message_text(
+            t(lang, "choose_product", category=category),
+            reply_markup=InlineKeyboardMarkup(keyboard_rows)
+        )
+        return BUY_PRODUCT
+
+    parts = data.split(":")
+    if len(parts) != 3 or parts[0] != "buy_dur":
+        await query.edit_message_text(t(lang, "purchase_selection_error"))
+        return BUY_DURATION
+
+    try:
+        product_id = int(parts[1])
+    except Exception:
+        await query.edit_message_text(t(lang, "purchase_selection_error"))
+        return BUY_DURATION
+
+    duration_key = parts[2]
+    selected_duration_data = context.user_data.get("buy_duration_map", {}).get(duration_key)
+    if not selected_duration_data:
+        await query.edit_message_text(t(lang, "purchase_selection_error"))
+        return BUY_DURATION
+    selected_duration = selected_duration_data.get("duration", "General")
+    selected_price = float(selected_duration_data.get("price", 0.0))
 
     session_db = get_session()
     try:
@@ -1015,20 +1182,23 @@ async def handle_final_purchase_callback(update: Update, context: ContextTypes.D
             await query.message.reply_text(t(lang, "buy_user_product_not_found"), reply_markup=get_keyboard_main(True, lang))
             return ConversationHandler.END
 
-        if usuario.saldo < producto.precio:
-            await query.message.reply_text(t(lang, "insufficient_balance", saldo=usuario.saldo))
-            return BUY_PRODUCT
+        price_to_charge = selected_price if selected_price > 0 else float(producto.precio)
+
+        if usuario.saldo < price_to_charge:
+            await query.edit_message_text(t(lang, "insufficient_balance", saldo=usuario.saldo))
+            return BUY_DURATION
 
         available_key = session_db.query(Key).filter_by(
             producto_id=producto.id,
+            duracion=selected_duration,
             estado='available'
         ).with_for_update().first()
 
         if not available_key:
-            await query.message.reply_text(t(lang, "product_out_of_stock", product_name=producto.nombre))
-            return BUY_PRODUCT
+            await query.edit_message_text(t(lang, "product_out_of_stock", product_name=producto.nombre))
+            return BUY_DURATION
 
-        usuario.saldo -= producto.precio
+        usuario.saldo -= price_to_charge
         available_key.estado = 'used'
         available_key.usuario_id = usuario.id
         available_key.fecha_compra = datetime.now()
@@ -1039,18 +1209,21 @@ async def handle_final_purchase_callback(update: Update, context: ContextTypes.D
                 lang,
                 "purchase_success",
                 product_name=md_safe(producto.nombre),
-                price=producto.precio,
+                price=price_to_charge,
                 saldo=usuario.saldo,
                 license_key=md_safe(available_key.licencia),
             ),
             parse_mode='Markdown',
             reply_markup=get_keyboard_main(True, lang)
         )
+        context.user_data.pop("buy_duration_map", None)
+        context.user_data.pop("buy_selected_product_id", None)
+        context.user_data.pop("selected_category", None)
         return ConversationHandler.END
     except Exception as e:
         logger.error(f"Error en compra inline: {e}")
         session_db.rollback()
-        await query.message.reply_text(t(lang, "purchase_error"))
+        await query.edit_message_text(t(lang, "purchase_error"))
         return ConversationHandler.END
     finally:
         session_db.close()
@@ -1209,6 +1382,7 @@ def main() -> None:
     application.add_handler(CommandHandler("logout", logout))
     application.add_handler(MessageHandler(filters.Regex("^👤"), show_account))
     application.add_handler(MessageHandler(filters.Regex("^🚀"), logout))
+    application.add_handler(CallbackQueryHandler(handle_account_inline, pattern=r"^account_(purchases|topups)$"))
 
     # Flujo de Login
     login_conv_handler = ConversationHandler(
@@ -1228,7 +1402,6 @@ def main() -> None:
             ],
             SET_LANGUAGE: [
                 CallbackQueryHandler(save_language_callback, pattern=r"^(setlang:|menu_back_start$)"),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, save_language),
             ],
         },
         fallbacks=[CommandHandler("start", start)],
@@ -1241,7 +1414,6 @@ def main() -> None:
         states={
             SET_LANGUAGE: [
                 CallbackQueryHandler(save_language_callback, pattern=r"^(setlang:|menu_back_start$)"),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, save_language),
             ]
         },
         fallbacks=[CommandHandler("start", start)],
@@ -1252,8 +1424,9 @@ def main() -> None:
     buy_conv_handler = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex("^🛒"), show_buy_menu)],
         states={
-            BUY_CATEGORY: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_category_selection)],
-            BUY_PRODUCT: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_final_purchase)],
+            BUY_CATEGORY: [CallbackQueryHandler(handle_category_selection_callback, pattern=r"^(buy_cat:|menu_back_start$)")],
+            BUY_PRODUCT: [CallbackQueryHandler(handle_product_selection_callback, pattern=r"^(buy_prod:|menu_buy$)")],
+            BUY_DURATION: [CallbackQueryHandler(handle_final_purchase_callback, pattern=r"^(buy_dur:|buy_back_prod$|menu_buy$)")],
         },
         fallbacks=[CommandHandler("start", start)], 
         per_user=True,
